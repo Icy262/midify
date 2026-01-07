@@ -6,7 +6,9 @@ fn main() {
 	//get the path to the flac
 	println!("Enter the path to the flac:");
 	let mut path = String::new();
-	std::io::stdin().read_line(&mut path).unwrap();
+	std::io::stdin()
+		.read_line(&mut path)
+		.unwrap();
 	let path = path.trim();
 
 	//very small hop size to maximize the time resolution
@@ -40,10 +42,16 @@ fn main() {
 	}
 
 	//calculate hann window. length N: w[n] = 0.5 * (1 - cos(2π n / (N-1)))
-	let hann_window: Vec<f32> = (0..window_size).map(|n| {0.5 - (2.0f32*std::f32::consts::PI*(n as f32)/((window_size - 1) as f32)).cos()/2.0f32}).collect();
+	let hann_window: Vec<f32> = (0..window_size)
+		.map(|n| {
+			0.5 - (2.0f32*std::f32::consts::PI*(n as f32)/((window_size - 1) as f32)).cos()/2.0f32
+		})
+		.collect();
 
 	//calculate frequency of each bin. freq is the top end of the bin
-	let freqs: Vec<f32> = (0..=window_size/2).map(|k| (k + 1) as f32 * (sample_rate as f32) / (window_size as f32)).collect(); //Nyquist
+	let freqs: Vec<f32> = (0..=window_size/2)
+		.map(|k| (k + 1) as f32 * (sample_rate as f32) / (window_size as f32))
+		.collect(); //Nyquist
 
 	//perform fft on the mono pcm
 	let mut planner = RealFftPlanner::<f32>::new();
@@ -52,21 +60,72 @@ fn main() {
 	let total_frames = (mono_flac.len() - window_size)/hop_size + 1;
 	let mut in_buffer = vec![0.0f32; window_size];
 	let mut output = vec![vec![0.0f32; freqs.len()]; total_frames];
-	for current_frame in 0..total_frames {
-		let frame_start = current_frame * hop_size;
-		let frame_end = frame_start + window_size;
-		
+	for current_frame in 0..total_frames {	
 		//windowing
 		for i in 0..window_size {
-			in_buffer[i] = mono_flac[frame_start + i] * hann_window[i];
+			in_buffer[i] = mono_flac[current_frame*hop_size + i] * hann_window[i];
 		}
 
 		r2c.process(&mut in_buffer, &mut spectrum).expect("fft failed");
 
-		//represent loudness as a fraction of the RMS
-		for (frequency_bin, magnitude) in spectrum.iter().enumerate() {
-			output[current_frame][frequency_bin] = (magnitude.re.powi(2) + magnitude.im.powi(2)).sqrt();
-		}
+		//convert the spectrum to power
+		output[current_frame] = spectrum
+			.iter()
+			.map(|magnitude| {
+				magnitude.re.powi(2) + magnitude.im.powi(2)
+			})
+			.collect();
 	}
+
 	println!("FFT complete");
+
+	//identify fundamentals
+	for mut frame in output {
+		//find total power
+		let total_power = frame
+			.iter()
+			.sum::<f32>();
+
+		//normalize power of each bin to a fraction of total power
+		frame = frame.iter()
+			.map(|amplitude| amplitude/total_power)
+			.collect();
+
+		//find any bin worth more than 10% of total and store index of that bin
+		let mut possible_fundamentals: Vec<usize> = frame
+			.iter()
+			.enumerate()
+			.filter_map(|(index, amplitude)| {
+				(*amplitude >= 0.10).then_some(index)
+			})
+			.collect::<Vec<usize>>();
+		
+		//sort the bin indexes by power
+		possible_fundamentals
+			.sort_by(|&index_1, &index_2| {
+				frame[index_2] //index 1 and 2 are swapped so that the list is high -> low instead of the other way around
+					.partial_cmp(&frame[index_1])
+					.expect("Amplitude not a positive float")
+			});
+
+		let mut confirmed_fundamentals: Vec<usize> = Vec::new();
+
+		//process all possible fundamentals starting with the most powerful
+		while possible_fundamentals.len() != 0 {
+			let index_of_fundamental = possible_fundamentals[0];
+
+			//remove index of largest power from possible and add to confirmed
+			confirmed_fundamentals.push(index_of_fundamental);
+			possible_fundamentals.remove(0);
+
+			possible_fundamentals = possible_fundamentals
+				.into_iter()
+				.filter_map(|index| {
+					//remove anything that isn't at least 20% of the strength of the main peak. We can assume it's just a harmonic or sub-harmonic
+					(frame[index] >= 0.2f32*frame[index_of_fundamental]).then_some(index)
+				})
+				.collect();
+		}
+		println!("{:?}", confirmed_fundamentals);
+	}
 }
