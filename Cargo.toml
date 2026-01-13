@@ -6,4 +6,4 @@ edition = "2024"
 [dependencies]
 flac = "0.5.0"
 realfft = "3.5.0"
-rustfft = "6.4.1"
+midly = "0.5.3"
